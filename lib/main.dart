@@ -33,6 +33,7 @@ class MapPage extends StatefulWidget {
 
 class _MapPageState extends State<MapPage> {
   final _mapViewController = ArcGISMapView.createController();
+
   final _mapImageLayers = [
     ImageLayer(
       layerName: 'Ukształtowanie terenu',
@@ -52,6 +53,9 @@ class _MapPageState extends State<MapPage> {
     ),
   ];
 
+  FeatureLayer? _bufferFeatureLayer;
+  int _activeLayerIndex = 0;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -69,31 +73,22 @@ class _MapPageState extends State<MapPage> {
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
-                  children: _mapImageLayers.map((layer) {
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                        ),
-                        onPressed: () => _changeActiveImageLayer(
-                          layerUri: layer.layerUri,
-                        ),
-                        child: Text(
-                          layer.layerName,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: Colors.yellow,
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
+                  children: [
+                    ..._mapImageLayers.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final layer = entry.value;
+                      return _buildLayerButton(
+                        name: layer.layerName,
+                        onTap: () => _activateImageLayer(index),
+                        isActive: _activeLayerIndex == index,
+                      );
+                    }),
+                    _buildLayerButton(
+                      name: 'Strefy buforowe NY SHPO',
+                      onTap: _activateShpoLayer,
+                      isActive: _activeLayerIndex == 3,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -103,34 +98,141 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
-  void _setUpMap() async {
-    final map = ArcGISMap.withBasemapStyle(BasemapStyle.arcGISTopographic);
-    ;
-    final ortoPhotoMapImageUri = Uri.parse(_mapImageLayers.first.layerUri);
-    final ortoPhotoMapImageLayer =
-        ArcGISMapImageLayer.withUri(ortoPhotoMapImageUri);
-    await ortoPhotoMapImageLayer.load();
-    map.operationalLayers.add(ortoPhotoMapImageLayer);
-    _mapViewController.arcGISMap = map;
-    final targetExtent = ortoPhotoMapImageLayer.fullExtent;
-    if (targetExtent != null) {
-      final viewPoint = Viewpoint.fromTargetExtent(targetExtent);
-      _mapViewController.setViewpoint(viewPoint);
-    }
+  Widget _buildLayerButton({
+    required String name,
+    required VoidCallback onTap,
+    required bool isActive,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: isActive ? Colors.yellow[800] : Colors.black,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        ),
+        onPressed: onTap,
+        child: Text(
+          name,
+          style: TextStyle(
+            fontSize: 14,
+            color: isActive ? Colors.black : Colors.yellow,
+          ),
+        ),
+      ),
+    );
   }
 
-  Future<void> _changeActiveImageLayer({
-    required String layerUri,
-  }) async {
-    _mapViewController.arcGISMap?.operationalLayers.clear();
-    final imageUri = Uri.parse(layerUri);
+  void _setUpMap() async {
+    final map = ArcGISMap.withBasemapStyle(BasemapStyle.arcGISTopographic);
+    _mapViewController.arcGISMap = map;
+
+    await _activateImageLayer(0); // domyślna warstwa
+  }
+
+  Future<void> _activateImageLayer(int index) async {
+    final map = _mapViewController.arcGISMap;
+    if (map == null) return;
+
+    map.operationalLayers.clear();
+    final imageUri = Uri.parse(_mapImageLayers[index].layerUri);
     final layer = ArcGISMapImageLayer.withUri(imageUri);
     await layer.load();
-    _mapViewController.arcGISMap?.operationalLayers.add(layer);
-    final targetExtent = layer.fullExtent;
-    if (targetExtent != null) {
-      final viewPoint = Viewpoint.fromTargetExtent(targetExtent);
-      _mapViewController.setViewpoint(viewPoint);
+    map.operationalLayers.add(layer);
+
+    final extent = layer.fullExtent;
+    if (extent != null) {
+      final viewpoint = Viewpoint.fromTargetExtent(extent);
+      _mapViewController.setViewpoint(viewpoint);
     }
+
+    setState(() {
+      _activeLayerIndex = index;
+    });
   }
+
+  Future<void> _activateShpoLayer() async {
+    final map = _mapViewController.arcGISMap;
+    if (map == null) return;
+    map.operationalLayers.clear();
+    if (_bufferFeatureLayer == null) {
+      final uri = Uri.parse(
+          'https://services.arcgis.com/1xFZPtKn1wKC6POA/ArcGIS/rest/services/Archaeological_Buffer_Areas/FeatureServer/15');
+      final table = ServiceFeatureTable.withUri(uri);
+      _bufferFeatureLayer = FeatureLayer.withFeatureTable(table);
+      _bufferFeatureLayer?.renderer = _classBreaksRenderer();
+      await _bufferFeatureLayer?.load();
+    }
+    map.operationalLayers.add(_bufferFeatureLayer!);
+    await _bufferFeatureLayer?.load();
+    final extent = _bufferFeatureLayer?.fullExtent;
+    if (extent != null) {
+      final viewpoint = Viewpoint.fromTargetExtent(extent);
+      _mapViewController.setViewpoint(viewpoint);
+    }
+    setState(() {
+      _activeLayerIndex = 3;
+    });
+  }
+
+  ClassBreak _createClassBreak({
+    required String label,
+    required double minKm2,
+    required double maxKm2,
+    required Color fillColor,
+    required Color outlineColor,
+    required double outlineWidth,
+    required SimpleLineSymbolStyle outlineStyle,
+  }) {
+    return ClassBreak(
+      label: label,
+      description: '',
+      minValue: minKm2 * 1e6,
+      maxValue: maxKm2.isFinite ? maxKm2 * 1e6 : double.infinity,
+      symbol: SimpleFillSymbol(
+        style: SimpleFillSymbolStyle.solid,
+        color: fillColor.withOpacity(0.6),
+        outline: SimpleLineSymbol(
+          color: outlineColor,
+          width: outlineWidth,
+          style: outlineStyle,
+        ),
+      ),
+    );
+  }
+
+  ClassBreaksRenderer _classBreaksRenderer() => ClassBreaksRenderer(
+        fieldName: 'Shape__Area',
+        classBreaks: [
+          _createClassBreak(
+            label: 'Małe (do 1 km²)',
+            minKm2: 0,
+            maxKm2: 1,
+            fillColor: Colors.lightGreen,
+            outlineColor: Colors.green,
+            outlineWidth: 1,
+            outlineStyle: SimpleLineSymbolStyle.solid,
+          ),
+          _createClassBreak(
+            label: 'Średnie (1–5 km²)',
+            minKm2: 1.000001,
+            maxKm2: 5,
+            fillColor: Colors.orange,
+            outlineColor: Colors.deepOrange,
+            outlineWidth: 1,
+            outlineStyle: SimpleLineSymbolStyle.dash,
+          ),
+          _createClassBreak(
+            label: 'Duże (powyżej 5 km²)',
+            minKm2: 5.000001,
+            maxKm2: double.infinity,
+            fillColor: Colors.redAccent,
+            outlineColor: Colors.red,
+            outlineWidth: 1.5,
+            outlineStyle: SimpleLineSymbolStyle.solid,
+          ),
+        ],
+      );
 }
